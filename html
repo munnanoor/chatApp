@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collaborative To-Do List</title>
+    
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        /* Custom styles to supplement Tailwind */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom focus ring color */
+        .focus-ring-custom:focus {
+            ring-color: #4f46e5; /* indigo-600 */
+            ring-offset-color: #1f2937; /* gray-800 */
+        }
+        /* Smooth transition for list items */
+        .todo-item {
+            transition: all 0.2s ease-in-out;
+        }
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1f2937; /* gray-800 */
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #4b5563; /* gray-600 */
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #6b7280; /* gray-500 */
+        }
+        /* Style for the inline edit input */
+        .edit-input {
+            background-color: transparent;
+            border: none;
+            color: white;
+            width: 100%;
+            padding: 0;
+            margin: 0;
+            font-size: inherit;
+            font-family: inherit;
+        }
+        .edit-input:focus {
+            outline: none;
+            background-color: #374151; /* gray-700 */
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+
+    <div class="flex flex-col items-center justify-center min-h-screen p-4">
+        <div class="w-full max-w-2xl bg-gray-800 rounded-xl shadow-2xl p-6 md:p-8 space-y-6">
+            
+            <!-- Header -->
+            <div class="text-center">
+                <h1 class="text-3xl md:text-4xl font-bold text-indigo-400">Sync-List</h1>
+                <p class="text-gray-400 mt-2">Your tasks, synced everywhere.</p>
+                <div class="mt-4 text-xs text-gray-500 break-all">
+                    <span class="font-semibold">Session ID:</span> <span id="user-id-display">Connecting...</span>
+                </div>
+            </div>
+
+            <!-- Add Task Form -->
+            <form id="add-todo-form" class="flex items-center gap-3">
+                <input 
+                    type="text" 
+                    id="todo-input"
+                    placeholder="Add a new task..."
+                    class="w-full bg-gray-700 border-2 border-gray-600 rounded-lg px-4 py-3 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus-ring-custom focus:border-indigo-500 transition duration-200"
+                    required
+                >
+                <button 
+                    type="submit"
+                    class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-5 rounded-lg transition duration-200 flex-shrink-0 flex items-center justify-center"
+                    aria-label="Add Task"
+                >
+                    <i class="fas fa-plus"></i>
+                </button>
+            </form>
+
+            <!-- To-Do List -->
+            <div id="loading-state" class="text-center text-gray-400 py-4">Loading tasks...</div>
+            <ul id="todo-list" class="space-y-3">
+                <!-- To-do items will be dynamically inserted here -->
+            </ul>
+
+        </div>
+        <footer class="mt-8 text-center text-gray-500 text-sm">
+            <p>Built with Firebase & Tailwind CSS</p>
+        </footer>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        // Import necessary Firebase functions
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, updateDoc, deleteDoc, query, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- 1. CONFIGURATION & INITIALIZATION ---
+        setLogLevel('debug');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-sync-list-app';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
+        // DOM element references
+        const todoForm = document.getElementById('add-todo-form');
+        const todoInput = document.getElementById('todo-input');
+        const todoList = document.getElementById('todo-list');
+        const userIdDisplay = document.getElementById('user-id-display');
+        const loadingState = document.getElementById('loading-state');
+
+        let currentUserId = null;
+        let todoCollectionRef = null;
+        let unsubscribeFromTodos = null;
+
+        // --- 2. AUTHENTICATION ---
+        async function signIn() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Authentication failed:", error);
+                userIdDisplay.textContent = "Authentication Error!";
+            }
+        }
+
+        onAuthStateChanged(auth, user => {
+            if (user) {
+                console.log("User authenticated with UID:", user.uid);
+                currentUserId = user.uid;
+                userIdDisplay.textContent = currentUserId;
+                if (unsubscribeFromTodos) unsubscribeFromTodos();
+                setupTodoListener(currentUserId);
+            } else {
+                console.log("User is signed out.");
+                currentUserId = null;
+                userIdDisplay.textContent = "Not connected";
+                todoList.innerHTML = '<li class="text-center text-gray-500">Please connect to see your tasks.</li>';
+                loadingState.style.display = 'none';
+                if (unsubscribeFromTodos) unsubscribeFromTodos();
+            }
+        });
+
+        // --- 3. FIRESTORE REAL-TIME DATA HANDLING ---
+        function setupTodoListener(userId) {
+            const collectionPath = `artifacts/${appId}/users/${userId}/todos`;
+            todoCollectionRef = collection(db, collectionPath);
+            const q = query(todoCollectionRef);
+
+            unsubscribeFromTodos = onSnapshot(q, (snapshot) => {
+                console.log("Received snapshot update. Number of docs:", snapshot.size);
+                const todos = [];
+                snapshot.forEach(doc => {
+                    todos.push({ id: doc.id, ...doc.data() });
+                });
+                renderTodos(todos);
+                loadingState.style.display = 'none';
+            }, (error) => {
+                console.error("Error listening to todo updates:", error);
+                loadingState.textContent = "Error loading tasks.";
+            });
+        }
+
+        function renderTodos(todos) {
+            todoList.innerHTML = '';
+            if (todos.length === 0) {
+                todoList.innerHTML = '<li class="text-center text-gray-500">No tasks yet. Add one!</li>';
+            } else {
+                // Sort by creation date to keep the list stable
+                todos.sort((a, b) => (a.createdAt?.toDate() || 0) - (b.createdAt?.toDate() || 0));
+                todos.forEach(todo => {
+                    const todoElement = createTodoElement(todo);
+                    todoList.appendChild(todoElement);
+                });
+            }
+        }
+
+        /**
+         * Creates an HTML list item element for a single to-do.
+         * @param {object} todo - The to-do object with id, text, and completed status.
+         * @returns {HTMLLIElement} The created list item element.
+         */
+        function createTodoElement(todo) {
+            const li = document.createElement('li');
+            li.className = 'todo-item bg-gray-700 rounded-lg p-4 flex items-center justify-between gap-4';
+            li.dataset.id = todo.id;
+
+            const isCompleted = todo.completed || false;
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = isCompleted;
+            checkbox.className = 'form-checkbox h-6 w-6 bg-gray-600 border-gray-500 rounded text-indigo-500 focus:ring-indigo-600 cursor-pointer flex-shrink-0';
+            checkbox.addEventListener('change', () => toggleTodoCompleted(todo.id, !isCompleted));
+
+            const textSpan = document.createElement('span');
+            textSpan.textContent = todo.text;
+            textSpan.className = `flex-grow cursor-pointer ${isCompleted ? 'line-through text-gray-500' : 'text-white'}`;
+            
+            // NEW: Click listener to enable editing
+            textSpan.addEventListener('click', () => {
+                if(isCompleted) return; // Don't edit completed tasks
+                enableEditing(textSpan, todo.id, todo.text);
+            });
+
+            const deleteButton = document.createElement('button');
+            deleteButton.innerHTML = '<i class="fas fa-trash-alt text-gray-500 hover:text-red-500 transition-colors"></i>';
+            deleteButton.className = 'p-2';
+            deleteButton.setAttribute('aria-label', 'Delete task');
+            deleteButton.addEventListener('click', () => deleteTodo(todo.id));
+
+            li.appendChild(checkbox);
+            li.appendChild(textSpan);
+            li.appendChild(deleteButton);
+
+            return li;
+        }
+
+        /**
+         * NEW: Replaces the task text with an input field to allow editing.
+         * @param {HTMLElement} spanElement - The span element containing the task text.
+         * @param {string} id - The document ID of the to-do.
+         * @param {string} currentText - The current text of the to-do.
+         */
+        function enableEditing(spanElement, id, currentText) {
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = currentText;
+            input.className = 'edit-input flex-grow'; // Use custom class for styling
+
+            // Replace span with input
+            spanElement.replaceWith(input);
+            input.focus();
+
+            // Function to save changes and revert to span
+            const saveChanges = () => {
+                const newText = input.value.trim();
+                if (newText && newText !== currentText) {
+                    updateTodoText(id, newText);
+                }
+                // The onSnapshot listener will automatically re-render the list,
+                // so we don't need to manually switch back to the span here.
+                // If there was no change, we can switch it back manually to avoid a flicker.
+                if (!newText || newText === currentText) {
+                    input.replaceWith(spanElement);
+                }
+            };
+
+            // Save when the input loses focus
+            input.addEventListener('blur', saveChanges);
+
+            // Save on 'Enter', cancel on 'Escape'
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    input.blur(); // Trigger the blur event to save
+                } else if (e.key === 'Escape') {
+                    input.removeEventListener('blur', saveChanges); // Prevent saving on blur
+                    input.replaceWith(spanElement); // Revert to original span
+                }
+            });
+        }
+
+
+        // --- 4. FIRESTORE CRUD (Create, Read, Update, Delete) OPERATIONS ---
+
+        todoForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const text = todoInput.value.trim();
+            if (text && currentUserId) {
+                try {
+                    await addDoc(todoCollectionRef, {
+                        text: text,
+                        completed: false,
+                        createdAt: new Date() // Use Firestore server timestamp for consistency
+                    });
+                    todoInput.value = '';
+                } catch (error) {
+                    console.error("Error adding document: ", error);
+                }
+            }
+        });
+
+        async function toggleTodoCompleted(id, newStatus) {
+            if (!currentUserId) return;
+            const docRef = doc(db, `artifacts/${appId}/users/${currentUserId}/todos`, id);
+            try {
+                await updateDoc(docRef, { completed: newStatus });
+            } catch (error) {
+                console.error("Error updating document status: ", error);
+            }
+        }
+        
+        /**
+         * NEW: Updates the text of a to-do item in Firestore.
+         * @param {string} id - The document ID of the to-do.
+         * @param {string} newText - The new text for the to-do.
+         */
+        async function updateTodoText(id, newText) {
+            if (!currentUserId) return;
+            const docRef = doc(db, `artifacts/${appId}/users/${currentUserId}/todos`, id);
+            try {
+                await updateDoc(docRef, { text: newText });
+                console.log("Updated todo text:", id);
+            } catch (error) {
+                console.error("Error updating document text: ", error);
+            }
+        }
+
+        async function deleteTodo(id) {
+            if (!currentUserId) return;
+            const docRef = doc(db, `artifacts/${appId}/users/${currentUserId}/todos`, id);
+            try {
+                await deleteDoc(docRef);
+            } catch (error) {
+                console.error("Error deleting document: ", error);
+            }
+        }
+
+        // --- 5. START THE APP ---
+        signIn();
+
+    </script>
+</body>
+</html>
